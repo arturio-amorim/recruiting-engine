@@ -1,0 +1,4 @@
+interface:
+  display_name: "Develop Senda Action Engine"
+  short_description: "Develop this Senda Action Engine safely"
+  default_prompt: "Use $develop-senda-project to implement this Action Engine change through the single engine.invoke path."

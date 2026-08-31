@@ -1,4 +1,4 @@
-import { createEngine, type Principal } from "@invokta/core";
+import { createEngine, type Principal } from "@senda/core";
 
 import type { RecruitingDependencies } from "./application/ports.js";
 import { createNotifyReview } from "./capabilities/notify-review.js";

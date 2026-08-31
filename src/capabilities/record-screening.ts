@@ -1,4 +1,4 @@
-import { defineCapability } from "@invokta/core";
+import { defineCapability } from "@senda/core";
 import { z } from "zod";
 
 import type { RecruitingDependencies } from "../application/ports.js";

@@ -1,4 +1,4 @@
-import { EngineError } from "@invokta/core";
+import { EngineError } from "@senda/core";
 
 export function domainFailure(
   message: string,

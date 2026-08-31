@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { fileURLToPath } from "node:url";
 
-import { runEngineInstallerCli } from "@invokta/installer/engine";
+import { runEngineInstallerCli } from "@senda/installer/engine";
 
 process.exitCode = await runEngineInstallerCli({
   argv: process.argv.slice(2),

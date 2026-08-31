@@ -1,4 +1,4 @@
-import { runCli } from "@invokta/cli";
+import { runCli } from "@senda/cli";
 
 import { engine, localPrincipal } from "./engine.js";
 

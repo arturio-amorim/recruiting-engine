@@ -1,4 +1,4 @@
-import { serveMcpStdio } from "@invokta/mcp";
+import { serveMcpStdio } from "@senda/mcp";
 
 import { engine, localPrincipal } from "./engine.js";
 

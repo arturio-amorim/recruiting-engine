@@ -1,6 +1,6 @@
 ---
-name: develop-invokta-project
-description: Develop this generated Invokta Action Engine when changing capabilities, dependencies, tests, or its direct invocation, CLI, MCP stdio, and MCP HTTP channels. Use for implementation, refactoring, debugging, and contract review in this project.
+name: develop-senda-project
+description: Develop this generated Senda Action Engine when changing capabilities, dependencies, tests, or its direct invocation, CLI, MCP stdio, and MCP HTTP channels. Use for implementation, refactoring, debugging, and contract review in this project.
 ---
 
 # Develop This Action Engine

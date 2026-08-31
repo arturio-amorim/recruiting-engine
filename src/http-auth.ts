@@ -7,7 +7,7 @@
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 
-import type { McpHttpAuthOptions } from "@invokta/mcp";
+import type { McpHttpAuthOptions } from "@senda/mcp";
 
 import { EngineStartupError } from "./env.js";
 
