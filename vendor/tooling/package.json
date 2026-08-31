@@ -1,0 +1,29 @@
+{
+  "name": "@senda/tooling",
+  "version": "0.7.0",
+  "description": "Development-time capability composition and MCP catalog checks for Senda.",
+  "author": "Vini Lana <vini@aicoders.academy>",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.20.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "senda": "./dist/cli.js"
+  },
+  "dependencies": {
+    "@senda/core": "file:../core",
+    "@senda/mcp": "file:../mcp"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "@senda/cli",
+  "version": "0.7.0",
+  "description": "Command-line adapter for invoking Senda Action Engines.",
+  "author": "Vini Lana <vini@aicoders.academy>",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.20.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@senda/core": "file:../core"
+  }
+}

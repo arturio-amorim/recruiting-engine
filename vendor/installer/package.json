@@ -1,0 +1,31 @@
+{
+  "name": "@senda/installer",
+  "version": "0.7.0",
+  "description": "Install and manage Senda Action Engines in local MCP clients.",
+  "author": "Vini Lana <vini@aicoders.academy>",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.20.0"
+  },
+  "files": [
+    "dist",
+    "registry"
+  ],
+  "exports": {
+    "./engine": {
+      "types": "./dist/engine-cli.d.ts",
+      "import": "./dist/engine-cli.js"
+    }
+  },
+  "bin": {
+    "senda-installer": "./dist/cli.js"
+  },
+  "dependencies": {
+    "@clack/prompts": "1.7.0",
+    "@humanwhocodes/momoa": "3.3.10",
+    "toml-eslint-parser": "1.0.3",
+    "yaml": "2.9.0"
+  }
+}

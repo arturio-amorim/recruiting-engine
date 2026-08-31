@@ -1,0 +1,30 @@
+{
+  "name": "@senda/devtools",
+  "version": "0.7.0",
+  "description": "Local MCP and CLI workbenches, installation verifier, and engine diagnostics for Senda.",
+  "author": "Vini Lana <vini@aicoders.academy>",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.20.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "senda-devtools": "./dist/cli.js"
+  },
+  "dependencies": {
+    "@senda/cli": "file:../cli",
+    "@senda/core": "file:../core",
+    "@senda/mcp": "file:../mcp"
+  }
+}
