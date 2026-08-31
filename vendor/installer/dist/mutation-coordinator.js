@@ -1,0 +1,500 @@
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import { InstallerError } from "./installer-error.js";
+import { acquireInstallerLocks, } from "./installer-lock.js";
+import { installationKey, isInstallerTimestampAfter, loadInstallerState, } from "./installer-state.js";
+import { applyInstallerStatePlan, serializeInstallerState, } from "./installer-state-transition.js";
+import { planInstallerAction, planOwnership, } from "./ownership-planner.js";
+import { bootstrapPrivateDirectory, capturePathIdentity, capturePathRoot, revalidatePathIdentity, } from "./path-identity.js";
+import { targetConfigByteLimit, } from "./target-adapter.js";
+const temporaryTokenBytes = 12;
+const unavailableTargetContracts = Object.freeze({});
+function inside(root, candidate) {
+    const difference = relative(resolve(root), resolve(candidate));
+    return (difference === "" ||
+        (difference !== ".." &&
+            !difference.startsWith(`..${sep}`) &&
+            !isAbsolute(difference)));
+}
+export function buildStateTargetContracts(snapshot, adapters) {
+    return Object.freeze(Object.fromEntries(snapshot.targets.flatMap((target) => {
+        if (target.configuration.kind === "blocked")
+            return [];
+        const metadata = adapters[target.id].metadata;
+        return [
+            [
+                target.id,
+                Object.freeze({
+                    configPath: target.configuration.path,
+                    targetContractVersion: metadata.targetContractVersion,
+                    toggleStrategy: metadata.toggleStrategy,
+                }),
+            ],
+        ];
+    })));
+}
+function sameStat(expected, actual) {
+    return (expected !== undefined &&
+        expected.kind === actual.kind &&
+        expected.dev === actual.dev &&
+        expected.ino === actual.ino &&
+        expected.uid === actual.uid &&
+        expected.gid === actual.gid);
+}
+async function readCapturedFile(fileSystem, identity, maximumBytes, errorCode) {
+    if (identity.missingPaths.length > 0)
+        return undefined;
+    let handle;
+    try {
+        handle = await fileSystem.openReadNoFollow(identity.targetPath);
+        if (!sameStat(identity.components.at(-1), await handle.stat())) {
+            throw new InstallerError(errorCode === "STATE_READ_FAILED" ? "STATE_CHANGED" : "CONFIG_CHANGED");
+        }
+        return await handle.readAll(maximumBytes);
+    }
+    catch (cause) {
+        if (cause instanceof InstallerError)
+            throw cause;
+        throw new InstallerError(errorCode, cause);
+    }
+    finally {
+        await handle?.close().catch(() => undefined);
+    }
+}
+async function ensureParentDirectory(dependencies, root, targetPath, unsafeCode) {
+    const parentPath = resolve(targetPath, "..");
+    if (!inside(root.path, parentPath)) {
+        throw new InstallerError(unsafeCode);
+    }
+    try {
+        const identity = await capturePathIdentity(dependencies.fileSystem, {
+            root,
+            targetPath: parentPath,
+            targetKind: "directory",
+        });
+        await bootstrapPrivateDirectory(dependencies.fileSystem, {
+            expected: identity,
+        });
+    }
+    catch (cause) {
+        throw new InstallerError(unsafeCode, cause);
+    }
+}
+function randomToken(randomBytes) {
+    const bytes = randomBytes(temporaryTokenBytes);
+    if (bytes.byteLength !== temporaryTokenBytes) {
+        throw new InstallerError("CONFIG_WRITE_FAILED");
+    }
+    return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+async function atomicReplace(dependencies, identity, bytes, failureCode) {
+    const { fileSystem } = dependencies;
+    const temporaryPath = `${identity.targetPath}.tmp.${randomToken(dependencies.lock.randomBytes)}`;
+    let created = false;
+    let handle;
+    const existing = identity.missingPaths.length === 0 ? identity.components.at(-1) : undefined;
+    const targetMode = existing === undefined ? 0o600 : existing.mode & 0o7777;
+    try {
+        handle = await fileSystem.createExclusiveNoFollow(temporaryPath, 0o600);
+        created = true;
+        await handle.writeAll(bytes);
+        if (existing !== undefined) {
+            await handle.chown(existing.uid, existing.gid);
+        }
+        await handle.chmod(targetMode);
+        await handle.sync();
+        await handle.close();
+        handle = undefined;
+        await revalidatePathIdentity(fileSystem, identity);
+        await fileSystem.rename(temporaryPath, identity.targetPath);
+        created = false;
+    }
+    catch (cause) {
+        await handle?.close().catch(() => undefined);
+        if (created)
+            await fileSystem.unlink(temporaryPath).catch(() => undefined);
+        if (cause instanceof InstallerError)
+            throw cause;
+        throw new InstallerError(failureCode, cause);
+    }
+}
+function installReplacementPatch(adapter, inspection, serverName, definition, disabled) {
+    if (inspection.currentServer.kind !== "present") {
+        throw new InstallerError("STATE_INVALID");
+    }
+    const removed = adapter.constructPatch({ action: "remove", inspection });
+    if (removed.kind !== "changed")
+        throw new InstallerError("STATE_INVALID");
+    const absent = adapter.inspect({
+        source: removed.postImage,
+        serverName,
+    });
+    const installed = adapter.constructPatch({
+        action: "install",
+        definition,
+        inspection: absent,
+    });
+    if (installed.kind !== "changed" || !disabled)
+        return installed;
+    const enabled = adapter.inspect({
+        source: installed.postImage,
+        serverName,
+    });
+    return adapter.constructPatch({ action: "disable", inspection: enabled });
+}
+async function rollbackConfig(dependencies, root, configPath, original) {
+    try {
+        const current = await capturePathIdentity(dependencies.fileSystem, {
+            root,
+            targetPath: configPath,
+            targetKind: "regular-file",
+        });
+        if (original === undefined) {
+            if (current.missingPaths.length === 0) {
+                await dependencies.fileSystem.unlink(configPath);
+            }
+        }
+        else {
+            await atomicReplace(dependencies, current, original, "CONFIG_WRITE_FAILED");
+        }
+    }
+    catch (cause) {
+        throw new InstallerError("CONFIG_ROLLBACK_FAILED", cause);
+    }
+}
+function findTarget(snapshot, targetId) {
+    const target = snapshot.targets.find(({ id }) => id === targetId);
+    if (target === undefined ||
+        !target.eligible ||
+        target.configuration.kind === "blocked") {
+        throw new InstallerError("TARGET_UNSUPPORTED");
+    }
+    return target;
+}
+async function relocatedManagedConfigPath(input, targetId, currentConfigPath) {
+    const loaded = await loadInstallerState({
+        ownership: input.dependencies.ownership,
+        environment: input.dependencies.environment,
+        fileSystem: input.dependencies.fileSystem,
+        homeDirectory: input.snapshot.homeDirectory,
+        targetContracts: unavailableTargetContracts,
+        allowUnavailableTargetContracts: true,
+    });
+    const installation = Object.values(loaded.state.installations).find((candidate) => candidate.entryId === input.descriptor.id &&
+        candidate.targetId === targetId);
+    if (installation === undefined ||
+        installation.configPath === currentConfigPath) {
+        return undefined;
+    }
+    if (!inside(input.snapshot.homeDirectory, installation.configPath)) {
+        throw new InstallerError("HARNESS_CONFIG_UNSAFE");
+    }
+    return installation.configPath;
+}
+function snapshotWithConfigPath(snapshot, targetId, configPath) {
+    return Object.freeze({
+        ...snapshot,
+        targets: Object.freeze(snapshot.targets.map((target) => target.id === targetId
+            ? Object.freeze({
+                ...target,
+                configuration: Object.freeze({
+                    kind: "present",
+                    path: configPath,
+                }),
+                eligible: true,
+            })
+            : target)),
+    });
+}
+async function migrateRelocatedManagedInstallation(input, targetId) {
+    const target = findTarget(input.snapshot, targetId);
+    const previousConfigPath = await relocatedManagedConfigPath(input, targetId, target.configuration.path);
+    if (previousConfigPath === undefined)
+        return;
+    const previousSnapshot = snapshotWithConfigPath(input.snapshot, targetId, previousConfigPath);
+    const previousContracts = buildStateTargetContracts(previousSnapshot, input.dependencies.adapters);
+    await mutateTarget({
+        ...input,
+        action: "remove",
+        snapshot: previousSnapshot,
+        targetIds: [targetId],
+    }, targetId, previousContracts, { allowUnavailableStateContracts: true });
+}
+function nextTimestamp(candidate, previous) {
+    if (previous === undefined ||
+        isInstallerTimestampAfter(candidate, previous)) {
+        return candidate;
+    }
+    const milliseconds = Date.parse(previous);
+    if (!Number.isFinite(milliseconds))
+        throw new InstallerError("STATE_INVALID");
+    return new Date(milliseconds + 1).toISOString();
+}
+async function mutateTarget(input, targetId, contracts, options = {}) {
+    const { dependencies, descriptor, snapshot } = input;
+    const target = findTarget(snapshot, targetId);
+    const configPath = target.configuration.path;
+    const adapter = dependencies.adapters[targetId];
+    const compatibility = adapter.compatibility(descriptor);
+    if (!compatibility.supported)
+        throw new InstallerError("TARGET_UNSUPPORTED");
+    const stateContracts = options.allowUnavailableStateContracts === true
+        ? Object.freeze({
+            [targetId]: contracts[targetId],
+        })
+        : contracts;
+    const loadedBeforeLock = await loadInstallerState({
+        ownership: dependencies.ownership,
+        environment: dependencies.environment,
+        fileSystem: dependencies.fileSystem,
+        homeDirectory: snapshot.homeDirectory,
+        targetContracts: stateContracts,
+        ...(options.allowUnavailableStateContracts === true
+            ? { allowUnavailableTargetContracts: true }
+            : {}),
+    });
+    const homeRoot = await capturePathRoot(dependencies.fileSystem, {
+        rootKind: "home",
+        rootPath: snapshot.homeDirectory,
+        ownership: dependencies.ownership,
+    }).catch((cause) => {
+        throw new InstallerError("HARNESS_CONFIG_UNSAFE", cause);
+    });
+    await ensureParentDirectory(dependencies, homeRoot, configPath, "HARNESS_CONFIG_UNSAFE");
+    const stateRoot = inside(homeRoot.path, loadedBeforeLock.path)
+        ? homeRoot
+        : await capturePathRoot(dependencies.fileSystem, {
+            rootKind: "state",
+            rootPath: resolve(loadedBeforeLock.path, "../.."),
+            ownership: dependencies.ownership,
+        }).catch((cause) => {
+            throw new InstallerError("STATE_INVALID", cause);
+        });
+    await ensureParentDirectory(dependencies, stateRoot, loadedBeforeLock.path, "STATE_INVALID");
+    const locks = await acquireInstallerLocks({
+        configPath,
+        statePath: loadedBeforeLock.path,
+        dependencies: { ...dependencies.lock, fileSystem: dependencies.fileSystem },
+    });
+    let primaryError;
+    try {
+        const loaded = await loadInstallerState({
+            ownership: dependencies.ownership,
+            environment: dependencies.environment,
+            fileSystem: dependencies.fileSystem,
+            homeDirectory: snapshot.homeDirectory,
+            targetContracts: stateContracts,
+            ...(options.allowUnavailableStateContracts === true
+                ? { allowUnavailableTargetContracts: true }
+                : {}),
+        });
+        if (loaded.path !== loadedBeforeLock.path) {
+            throw new InstallerError("STATE_CHANGED");
+        }
+        if (options.manifestServerName !== undefined &&
+            Object.values(loaded.state.installations).some((installation) => installation.entryId !== descriptor.id &&
+                installation.serverName === options.manifestServerName)) {
+            throw new InstallerError("ENGINE_IDENTITY_MISMATCH");
+        }
+        const configIdentity = await capturePathIdentity(dependencies.fileSystem, {
+            root: homeRoot,
+            targetPath: configPath,
+            targetKind: "regular-file",
+        });
+        const stateIdentity = await capturePathIdentity(dependencies.fileSystem, {
+            root: stateRoot,
+            targetPath: loaded.path,
+            targetKind: "regular-file",
+        });
+        const source = await readCapturedFile(dependencies.fileSystem, configIdentity, targetConfigByteLimit, "HARNESS_CONFIG_READ_FAILED");
+        const inspection = adapter.inspect({
+            source,
+            serverName: descriptor.server.name,
+        });
+        const registryDefinition = adapter.descriptorToDefinition(descriptor);
+        const managedInstallation = loaded.state.installations[installationKey(descriptor.id, targetId, configPath)];
+        const planning = {
+            descriptor,
+            targetId,
+            target: contracts[targetId],
+            state: loaded.state,
+            registryDefinition,
+            ...(managedInstallation?.suspendedDescriptor === undefined
+                ? {}
+                : {
+                    normalizedSuspendedDefinition: adapter.suspendedDescriptorToDefinition(managedInstallation.suspendedDescriptor),
+                }),
+            currentServer: inspection.currentServer,
+        };
+        let stateBytes;
+        let patch;
+        if (input.action === "remove") {
+            if (managedInstallation === undefined) {
+                if (options.allowAlreadyAbsentRemoval === true &&
+                    inspection.currentServer.kind === "absent") {
+                    return "unchanged";
+                }
+                throw new InstallerError("INSTALLATION_UNAVAILABLE");
+            }
+            const ownership = planOwnership(planning);
+            if (ownership.status === "drifted") {
+                throw new InstallerError("CONFIG_DRIFT");
+            }
+            if (ownership.status === "conflict") {
+                throw new InstallerError("CONFIG_CONFLICT");
+            }
+            const nextInstallations = { ...loaded.state.installations };
+            delete nextInstallations[installationKey(descriptor.id, targetId, configPath)];
+            stateBytes = serializeInstallerState({ schemaVersion: 1, installations: nextInstallations }, stateContracts, options.allowUnavailableStateContracts === true
+                ? { allowUnavailableTargetContracts: true }
+                : {});
+            patch =
+                inspection.currentServer.kind === "absent"
+                    ? { kind: "unchanged" }
+                    : adapter.constructPatch({ action: "remove", inspection });
+        }
+        else {
+            const plan = planInstallerAction(planning, input.action);
+            if (plan.outcome === "blocked")
+                throw new InstallerError(plan.code);
+            if (plan.outcome === "unchanged")
+                return "unchanged";
+            const transition = applyInstallerStatePlan({
+                adapter,
+                ...(options.allowUnavailableStateContracts === true
+                    ? { allowUnavailableTargetContracts: true }
+                    : {}),
+                occurredAt: nextTimestamp(dependencies.now(), managedInstallation?.updatedAt),
+                plan,
+                planning,
+                targetContracts: stateContracts,
+            });
+            if (transition === undefined)
+                throw new InstallerError("STATE_INVALID");
+            stateBytes = transition.bytes;
+            patch =
+                plan.configEffect === "none"
+                    ? { kind: "unchanged" }
+                    : plan.configEffect === "replace" ||
+                        plan.configEffect === "replace-disabled"
+                        ? installReplacementPatch(adapter, inspection, descriptor.server.name, registryDefinition, plan.configEffect === "replace-disabled")
+                        : input.action === "install"
+                            ? adapter.constructPatch({
+                                action: "install",
+                                definition: registryDefinition,
+                                inspection,
+                            })
+                            : input.action === "enable"
+                                ? adapter.constructPatch({
+                                    action: "enable",
+                                    ...(transition.restoreDefinition === undefined
+                                        ? {}
+                                        : { restoreDefinition: transition.restoreDefinition }),
+                                    inspection,
+                                })
+                                : adapter.constructPatch({ action: "disable", inspection });
+            if (patch.kind !== "changed" && plan.configEffect !== "none") {
+                throw new InstallerError("STATE_INVALID");
+            }
+        }
+        const configPostImage = patch.kind === "changed" ? patch.postImage : undefined;
+        if (configPostImage !== undefined) {
+            await atomicReplace(dependencies, configIdentity, configPostImage, "CONFIG_WRITE_FAILED");
+        }
+        try {
+            await atomicReplace(dependencies, stateIdentity, stateBytes, "STATE_WRITE_FAILED");
+        }
+        catch (cause) {
+            if (configPostImage !== undefined) {
+                await rollbackConfig(dependencies, homeRoot, configPath, source);
+            }
+            throw cause;
+        }
+        return input.action === "remove"
+            ? "removed"
+            : input.action === "install"
+                ? "installed"
+                : input.action === "enable"
+                    ? "enabled"
+                    : "disabled";
+    }
+    catch (cause) {
+        primaryError = cause;
+        throw cause;
+    }
+    finally {
+        await locks.release(primaryError);
+    }
+}
+export async function installDescriptorAcrossTargets(input) {
+    const contracts = buildStateTargetContracts(input.snapshot, input.dependencies.adapters);
+    const results = [];
+    const seen = new Set();
+    for (const targetId of input.targetIds) {
+        if (seen.has(targetId))
+            continue;
+        seen.add(targetId);
+        try {
+            await migrateRelocatedManagedInstallation(input, targetId);
+            const outcome = await mutateTarget({ ...input, action: "install" }, targetId, contracts, { allowUnavailableStateContracts: true });
+            results.push(Object.freeze({ targetId, outcome }));
+        }
+        catch (cause) {
+            const error = cause instanceof InstallerError
+                ? cause
+                : new InstallerError("INSTALLER_INITIALIZATION_FAILED", cause);
+            results.push(Object.freeze({ targetId, outcome: "failed", code: error.code }));
+        }
+    }
+    return Object.freeze(results);
+}
+export async function removeEngineDescriptorFromTarget(input) {
+    const contracts = buildStateTargetContracts(input.snapshot, input.dependencies.adapters);
+    try {
+        const outcome = await mutateTarget({
+            action: "remove",
+            dependencies: input.dependencies,
+            descriptor: input.descriptor,
+            snapshot: input.snapshot,
+            targetIds: [input.targetId],
+        }, input.targetId, contracts, {
+            allowAlreadyAbsentRemoval: true,
+            allowUnavailableStateContracts: true,
+            manifestServerName: input.manifestServerName,
+        });
+        return Object.freeze({ targetId: input.targetId, outcome });
+    }
+    catch (cause) {
+        const error = cause instanceof InstallerError
+            ? cause
+            : new InstallerError("INSTALLER_INITIALIZATION_FAILED", cause);
+        return Object.freeze({
+            targetId: input.targetId,
+            outcome: "failed",
+            code: error.code,
+        });
+    }
+}
+export async function mutateDescriptorAcrossTargets(input) {
+    const contracts = buildStateTargetContracts(input.snapshot, input.dependencies.adapters);
+    const results = [];
+    const seen = new Set();
+    for (const targetId of input.targetIds) {
+        if (seen.has(targetId))
+            continue;
+        seen.add(targetId);
+        try {
+            const outcome = await mutateTarget(input, targetId, contracts, {
+                allowUnavailableStateContracts: true,
+            });
+            results.push(Object.freeze({ targetId, outcome }));
+        }
+        catch (cause) {
+            const error = cause instanceof InstallerError
+                ? cause
+                : new InstallerError("INSTALLER_INITIALIZATION_FAILED", cause);
+            results.push(Object.freeze({ targetId, outcome: "failed", code: error.code }));
+        }
+    }
+    return Object.freeze(results);
+}
+//# sourceMappingURL=mutation-coordinator.js.map

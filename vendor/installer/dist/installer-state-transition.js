@@ -1,0 +1,218 @@
+import { InstallerError } from "./installer-error.js";
+import { installationKey, isInstallerTimestampAfter, validateInstallerStateBytes, } from "./installer-state.js";
+import { canonicalizeJcs, fingerprintNormalizedDefinition, } from "./jcs-fingerprint.js";
+import { planInstallerAction, } from "./ownership-planner.js";
+const encoder = new TextEncoder();
+function invalidState() {
+    throw new InstallerError("STATE_INVALID");
+}
+function normalizeAndSerializeInstallerState(state, targetContracts, options = {}) {
+    let bytes;
+    try {
+        bytes = encoder.encode(`${canonicalizeJcs(state)}\n`);
+    }
+    catch {
+        return invalidState();
+    }
+    const validation = validateInstallerStateBytes(bytes, targetContracts, options);
+    if (!validation.ok)
+        return invalidState();
+    return Object.freeze({ state: validation.state, bytes });
+}
+export function serializeInstallerState(state, targetContracts, options = {}) {
+    return normalizeAndSerializeInstallerState(state, targetContracts, options)
+        .bytes;
+}
+function plansMatch(expected, received) {
+    if (expected.outcome !== received.outcome ||
+        expected.action !== received.action ||
+        expected.configEffect !== received.configEffect ||
+        expected.stateEffect !== received.stateEffect) {
+        return false;
+    }
+    if (expected.outcome === "blocked" || received.outcome === "blocked") {
+        return (expected.outcome === "blocked" &&
+            received.outcome === "blocked" &&
+            expected.code === received.code);
+    }
+    if (expected.outcome === "write" || received.outcome === "write") {
+        return (expected.outcome === "write" &&
+            received.outcome === "write" &&
+            expected.definitionSource === received.definitionSource);
+    }
+    return true;
+}
+function selectedCreateDefinition(plan, planning) {
+    if (plan.definitionSource === "registry") {
+        return planning.registryDefinition;
+    }
+    if (plan.definitionSource === "current" &&
+        planning.currentServer.kind === "present") {
+        return planning.currentServer.definition;
+    }
+    return invalidState();
+}
+function createInstallation(plan, planning, occurredAt) {
+    if (plan.stateEffect !== "create" ||
+        (plan.action !== "install" && plan.action !== "adopt")) {
+        return invalidState();
+    }
+    const definition = selectedCreateDefinition(plan, planning);
+    return {
+        entryId: planning.descriptor.id,
+        registryVersion: planning.descriptor.version,
+        targetId: planning.targetId,
+        configPath: planning.target.configPath,
+        serverName: planning.descriptor.server.name,
+        definitionSha256: fingerprintNormalizedDefinition(definition, planning.target.toggleStrategy),
+        targetContractVersion: planning.target.targetContractVersion,
+        toggleStrategy: planning.target.toggleStrategy,
+        launchDescriptor: planning.descriptor.server,
+        adopted: plan.action === "adopt",
+        installedAt: occurredAt,
+        updatedAt: occurredAt,
+    };
+}
+function updatedInstallation(installation, suspendedDescriptor, occurredAt) {
+    return {
+        entryId: installation.entryId,
+        registryVersion: installation.registryVersion,
+        targetId: installation.targetId,
+        configPath: installation.configPath,
+        serverName: installation.serverName,
+        definitionSha256: installation.definitionSha256,
+        targetContractVersion: installation.targetContractVersion,
+        toggleStrategy: installation.toggleStrategy,
+        ...(installation.launchDescriptor === undefined
+            ? {}
+            : { launchDescriptor: installation.launchDescriptor }),
+        ...(suspendedDescriptor === undefined ? {} : { suspendedDescriptor }),
+        adopted: installation.adopted,
+        installedAt: installation.installedAt,
+        updatedAt: occurredAt,
+    };
+}
+function applyUpdate(plan, planning, adapter, installation, occurredAt) {
+    if (plan.stateEffect !== "update" ||
+        (plan.action !== "install" &&
+            plan.action !== "enable" &&
+            plan.action !== "disable")) {
+        return invalidState();
+    }
+    if (!isInstallerTimestampAfter(occurredAt, installation.updatedAt)) {
+        return invalidState();
+    }
+    if (plan.action === "install") {
+        if (plan.definitionSource !== "registry")
+            return invalidState();
+        const suspendedDescriptor = planning.target.toggleStrategy === "detached" &&
+            planning.currentServer.kind === "absent"
+            ? planning.descriptor.server
+            : undefined;
+        return {
+            installation: {
+                entryId: planning.descriptor.id,
+                registryVersion: planning.descriptor.version,
+                targetId: planning.targetId,
+                configPath: planning.target.configPath,
+                serverName: planning.descriptor.server.name,
+                definitionSha256: fingerprintNormalizedDefinition(planning.registryDefinition, planning.target.toggleStrategy),
+                targetContractVersion: planning.target.targetContractVersion,
+                toggleStrategy: planning.target.toggleStrategy,
+                launchDescriptor: planning.descriptor.server,
+                ...(suspendedDescriptor === undefined ? {} : { suspendedDescriptor }),
+                adopted: false,
+                installedAt: installation.installedAt,
+                updatedAt: occurredAt,
+            },
+        };
+    }
+    if (planning.target.toggleStrategy !== "detached") {
+        if (plan.definitionSource !== "managed")
+            return invalidState();
+        return {
+            installation: updatedInstallation(installation, undefined, occurredAt),
+        };
+    }
+    if (plan.action === "disable") {
+        if (plan.definitionSource !== "managed" ||
+            planning.currentServer.kind !== "present" ||
+            installation.suspendedDescriptor !== undefined) {
+            return invalidState();
+        }
+        const suspendedDescriptor = adapter.definitionToSuspendedDescriptor(installation.serverName, planning.currentServer.definition);
+        return {
+            installation: updatedInstallation(installation, suspendedDescriptor, occurredAt),
+        };
+    }
+    if (plan.definitionSource !== "suspended" ||
+        installation.suspendedDescriptor === undefined) {
+        return invalidState();
+    }
+    const restoreDefinition = adapter.suspendedDescriptorToDefinition(installation.suspendedDescriptor);
+    if (fingerprintNormalizedDefinition(restoreDefinition, "detached") !==
+        installation.definitionSha256) {
+        return invalidState();
+    }
+    return {
+        installation: updatedInstallation(installation, undefined, occurredAt),
+        restoreDefinition,
+    };
+}
+function assertAdapterContract(input) {
+    const { adapter, planning, targetContracts } = input;
+    const contract = targetContracts[planning.targetId];
+    if (contract === undefined ||
+        contract.configPath !== planning.target.configPath ||
+        contract.targetContractVersion !== planning.target.targetContractVersion ||
+        contract.toggleStrategy !== planning.target.toggleStrategy ||
+        adapter.metadata.targetId !== planning.targetId ||
+        adapter.metadata.targetContractVersion !==
+            planning.target.targetContractVersion ||
+        adapter.metadata.toggleStrategy !== planning.target.toggleStrategy) {
+        invalidState();
+    }
+}
+export function applyInstallerStatePlan(input) {
+    assertAdapterContract(input);
+    const expectedPlan = planInstallerAction(input.planning, input.plan.action);
+    if (!plansMatch(expectedPlan, input.plan))
+        return invalidState();
+    if (input.plan.outcome !== "write")
+        return undefined;
+    const key = installationKey(input.planning.descriptor.id, input.planning.targetId, input.planning.target.configPath);
+    const currentInstallation = input.planning.state.installations[key];
+    let nextInstallation;
+    let restoreDefinition;
+    if (input.plan.stateEffect === "create") {
+        if (currentInstallation !== undefined)
+            return invalidState();
+        nextInstallation = createInstallation(input.plan, input.planning, input.occurredAt);
+    }
+    else {
+        if (currentInstallation === undefined)
+            return invalidState();
+        const update = applyUpdate(input.plan, input.planning, input.adapter, currentInstallation, input.occurredAt);
+        nextInstallation = update.installation;
+        restoreDefinition = update.restoreDefinition;
+    }
+    const normalized = normalizeAndSerializeInstallerState({
+        schemaVersion: 1,
+        installations: {
+            ...input.planning.state.installations,
+            [key]: nextInstallation,
+        },
+    }, input.targetContracts, input.allowUnavailableTargetContracts === true
+        ? { allowUnavailableTargetContracts: true }
+        : {});
+    const installation = normalized.state.installations[key];
+    if (installation === undefined)
+        return invalidState();
+    return Object.freeze({
+        state: normalized.state,
+        bytes: normalized.bytes,
+        installation,
+        ...(restoreDefinition === undefined ? {} : { restoreDefinition }),
+    });
+}
+//# sourceMappingURL=installer-state-transition.js.map

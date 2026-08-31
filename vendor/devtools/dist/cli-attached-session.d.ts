@@ -1,0 +1,4 @@
+import { type AttachedCliSessionController, type CreateAttachedCliSessionControllerOptions } from "./cli-attached-contract.js";
+export { ATTACHED_CLI_SESSION_LIMITS, type AttachedCliActivityRecord, type AttachedCliAnnotations, type AttachedCliCapabilityDescription, type AttachedCliCapabilitySummary, type AttachedCliConnectionSummary, type AttachedCliSessionClock, type AttachedCliSessionController, AttachedCliSessionError, type AttachedCliSessionErrorCode, type AttachedCliSessionState, type AttachedCliSpawn, type AttachedCliSpawnOptions, type CreateAttachedCliSessionControllerOptions, } from "./cli-attached-contract.js";
+export declare function createAttachedCliSessionController(options?: CreateAttachedCliSessionControllerOptions): AttachedCliSessionController;
+//# sourceMappingURL=cli-attached-session.d.ts.map

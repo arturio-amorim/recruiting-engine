@@ -1,0 +1,43 @@
+import { constants } from "node:fs";
+import { access, realpath, stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { basename, delimiter, resolve } from "node:path";
+export const resolveNodeOperatingSystemHome = () => homedir();
+export function createNodeExecutableResolver(options = {}) {
+    const pathValue = options.pathValue ?? process.env.PATH;
+    const searchDirectories = pathValue === undefined ? [] : pathValue.split(delimiter);
+    return async (candidate) => {
+        if (candidate === "" || candidate.includes("\0"))
+            return undefined;
+        const paths = candidate.includes("/")
+            ? [resolve(candidate)]
+            : candidate.includes("\\")
+                ? []
+                : searchDirectories.map((directory) => resolve(directory === "" ? "." : directory, candidate));
+        for (const path of paths) {
+            try {
+                const metadata = await stat(path);
+                if (!metadata.isFile() || (metadata.mode & 0o111) === 0)
+                    continue;
+                await access(path, constants.X_OK);
+                const resolvedPath = await realpath(path);
+                return Object.freeze({
+                    path,
+                    identity: Object.freeze({
+                        device: metadata.dev,
+                        inode: metadata.ino,
+                        realPath: resolvedPath,
+                    }),
+                    ...(candidate === "antigravity" && basename(resolvedPath) === "agy"
+                        ? { legacyAliasFor: "agy" }
+                        : {}),
+                });
+            }
+            catch {
+                // A missing, unreadable, or non-executable PATH candidate is no evidence.
+            }
+        }
+        return undefined;
+    };
+}
+//# sourceMappingURL=node-harness-environment.js.map

@@ -1,0 +1,59 @@
+import { installerErrorMessages, InstallerError } from "./installer-error.js";
+function inventoryResult(target) {
+    const configuration = target.configuration.kind === "blocked"
+        ? target.configuration.code
+        : target.configuration.path;
+    const surfaces = target.surfaceIds.length === 0 ? "none" : target.surfaceIds.join(", ");
+    return [
+        `Surfaces: ${surfaces}`,
+        `Evidence: ${target.evidence}`,
+        `Configuration: ${configuration}`,
+        `Configuration creation: ${target.mayCreateConfiguration ? "allowed" : "not allowed"}`,
+        `Reload: ${target.reloadHint}`,
+    ].join("\n");
+}
+function cancelInventory(prompter) {
+    prompter.cancel(installerErrorMessages.CANCELLED);
+    return 130;
+}
+export async function runReadOnlyInventory(snapshot, prompter) {
+    const targets = snapshot.targets.filter(({ evidence }) => evidence !== "absent");
+    if (targets.length === 0) {
+        prompter.note(installerErrorMessages.NO_SUPPORTED_HARNESS, "Harness inventory");
+        const dismissal = await prompter.select({
+            message: "No supported harnesses were found.",
+            options: [{ value: "dismiss", label: "Dismiss" }],
+        });
+        if (dismissal.kind === "cancelled")
+            return cancelInventory(prompter);
+        prompter.outro("No changes were made.");
+        return 0;
+    }
+    prompter.note(`${String(targets.length)} supported configuration target${targets.length === 1 ? "" : "s"} detected.`, "Harness inventory");
+    const selection = await prompter.select({
+        message: "Inspect a detected target.",
+        options: [
+            ...targets.map((target) => ({
+                value: target.id,
+                label: target.displayName,
+                hint: target.configuration.kind === "blocked"
+                    ? target.configuration.code
+                    : target.evidence,
+                ...(target.configuration.kind === "blocked" ? { disabled: true } : {}),
+            })),
+            { value: "dismiss", label: "Done" },
+        ],
+    });
+    if (selection.kind === "cancelled")
+        return cancelInventory(prompter);
+    if (selection.value !== "dismiss") {
+        const target = targets.find(({ id }) => id === selection.value);
+        if (target === undefined) {
+            throw new InstallerError("INSTALLER_INITIALIZATION_FAILED");
+        }
+        prompter.note(inventoryResult(target), target.displayName);
+    }
+    prompter.outro("Read-only inventory complete. No changes were made.");
+    return 0;
+}
+//# sourceMappingURL=read-only-inventory.js.map
