@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "entry": "dist/mcp-http.js",
+  "env": {
+    "required": ["RECRUITING_ENGINE_HTTP_TOKEN"],
+    "optional": []
+  },
+  "image": { "baseImage": "node:22-slim", "port": 3000 },
+  "healthcheck": { "expect": "alive" }
+}

@@ -1,0 +1,42 @@
+{
+  "name": "recruiting-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Action Engine de triagem da Norte Talentos: rubrica, ATS e aviso de revisão invocáveis por CLI, MCP stdio e MCP HTTP.",
+  "engines": { "node": ">=22.20.0" },
+  "bin": { "recruiting-engine": "./dist/bin.js" },
+  "files": ["dist", "invokta.mcp.json"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json --pretty false",
+    "typecheck": "tsc -p tsconfig.json --pretty false --noEmit && tsc -p tsconfig.test.json --pretty false --noEmit",
+    "test": "vitest run",
+    "check": "tsc -p tsconfig.json --pretty false --noEmit && tsc -p tsconfig.test.json --pretty false --noEmit && vitest run && tsc -p tsconfig.json --pretty false && invokta check-mcp ./dist/engine.js",
+    "check:mcp": "invokta check-mcp ./dist/engine.js",
+    "direct": "node dist/direct.js",
+    "devtools": "tsc -p tsconfig.json --pretty false && invokta-devtools serve dist/engine.js --watch --build \"tsc -p tsconfig.json --pretty false\"",
+    "devtools:doctor": "tsc -p tsconfig.json --pretty false && invokta-devtools doctor dist/engine.js",
+    "cli": "node dist/cli.js",
+    "mcp:stdio": "node dist/mcp-stdio.js",
+    "mcp:install": "tsc -p tsconfig.json --pretty false && invokta-installer install --engine .",
+    "mcp:uninstall": "invokta-installer remove --engine .",
+    "mcp:http": "node dist/mcp-http.js",
+    "deploy:package": "invokta-deploy package",
+    "deploy:probe": "invokta-deploy probe"
+  },
+  "dependencies": {
+    "@invokta/cli": "0.7.0",
+    "@invokta/core": "0.7.0",
+    "@invokta/installer": "0.7.0",
+    "@invokta/mcp": "0.7.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@invokta/deploy": "0.7.0",
+    "@invokta/devtools": "0.7.0",
+    "@invokta/tooling": "0.7.0",
+    "@types/node": "26.1.2",
+    "typescript": "7.0.2",
+    "vitest": "^4.1.10"
+  }
+}

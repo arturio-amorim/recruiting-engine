@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "recruiting-engine",
+  "version": "0.1.0",
+  "title": "Recruiting Engine",
+  "description": "MCP access to the Norte Talentos recruiting Action Engine.",
+  "capabilityIds": [
+    "recruiting.screen-candidate",
+    "recruiting.record-screening",
+    "recruiting.notify-review"
+  ],
+  "server": {
+    "name": "recruiting-engine",
+    "entrypoint": "dist/mcp-stdio.js",
+    "forwardEnv": []
+  }
+}
